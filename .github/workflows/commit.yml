@@ -21,7 +21,7 @@ jobs:
         with:
           version: 12
           runtime: node@24
-          cache: true
+          cache: false
 
       # 安装 go
       - name: Setup go
