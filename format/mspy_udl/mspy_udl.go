@@ -194,7 +194,7 @@ func (f *MspyUDL) GetIndex(py []string) []byte {
 // 三位简拼
 func (f *MspyUDL) jianpin(py []string) []byte {
 	ret := make([]byte, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if i >= len(py) {
 			break
 		}

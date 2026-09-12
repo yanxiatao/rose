@@ -117,10 +117,7 @@ func (MsUDP) Export(di []*model.Entry, w io.Writer) error {
 		wordBytes := utf16.Encode(v.Word)
 		codeBytes := utf16.Encode(v.Code.String())
 		b = append(b, util.To2Bytes(len(codeBytes)+18)...)
-		rank := v.Rank
-		if rank < 1 {
-			rank = 1
-		}
+		rank := max(v.Rank, 1)
 		b = append(b, byte(rank))
 		b = append(b, 0x06, 0, 0, 0, 0)
 		b = append(b, insert_stamp...)

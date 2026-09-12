@@ -35,7 +35,7 @@ func checkSumStream(rd io.Reader) [4]uint32 {
 	// 填充后计算
 	padding := padBlock(block, length)
 	n := len(padding) / 64
-	for i := 0; i < n; i++ {
+	for i := range n {
 		blockGeneric(&state, [64]byte(padding[64*i:]))
 	}
 	return state
@@ -98,7 +98,7 @@ func rotateLeft(x uint32, n uint) uint32 {
 
 func blockGeneric(state *[4]uint32, block [64]byte) {
 	var x [16]uint32
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		x[i] = binary.LittleEndian.Uint32(block[i*4:])
 	}
 

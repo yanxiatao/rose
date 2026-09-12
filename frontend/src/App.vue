@@ -12,7 +12,7 @@ import FilterConfigVue from './components/FilterConfig.vue'
 import {
   useFormats, convertFile, matchFormatByExt,
   type UploadResult, type EncoderConfig, type FilterConfig,
-  type ConvertResult, type CustomFormatConfig
+  type ConvertResult, type CustomFormatConfig, type FormatInfo
 } from './api'
 
 // 格式列表
@@ -45,9 +45,22 @@ const convertResult = ref<ConvertResult | null>(null)
 const errorMsg = ref('')
 
 // 选中的输出格式信息
-const selectedOutputFormat = computed(() =>
-  formats.value.find(f => f.id === outputFormat.value) || null
-)
+const selectedOutputFormat = computed<FormatInfo | null>(() => {
+  if (outputFormat.value === '__custom__' && outputCustomConfig.value) {
+    let kind = 3
+    if (outputCustomConfig.value.kind === 'wubi') kind = 2
+    else if (outputCustomConfig.value.kind === 'pinyin') kind = 1
+    return {
+      id: '__custom__',
+      name: '自定义格式',
+      kind,
+      ext: '.txt',
+      canImport: true,
+      canExport: true,
+    }
+  }
+  return formats.value.find(f => f.id === outputFormat.value) || null
+})
 
 // 是否可以转换
 const canConvert = computed(() =>
@@ -145,10 +158,14 @@ function resetFilter() {
               />
             </div>
             <div v-if="inputFormat === '__custom__' && inputCustomConfig" style="margin-top: 8px">
-              <n-tag size="small" type="info">已配置自定义输入格式</n-tag>
+              <n-tag size="small" :type="inputCustomConfig.kind === 'wubi' ? 'warning' : 'info'">
+                已配置自定义输入格式（{{ inputCustomConfig.kind === 'wubi' ? '五笔' : inputCustomConfig.kind === 'pinyin' ? '拼音' : '纯词组' }}）
+              </n-tag>
             </div>
             <div v-if="outputFormat === '__custom__' && outputCustomConfig" style="margin-top: 8px">
-              <n-tag size="small" type="info">已配置自定义输出格式</n-tag>
+              <n-tag size="small" :type="outputCustomConfig.kind === 'wubi' ? 'warning' : 'info'">
+                已配置自定义输出格式（{{ outputCustomConfig.kind === 'wubi' ? '五笔' : outputCustomConfig.kind === 'pinyin' ? '拼音' : '纯词组' }}）
+              </n-tag>
             </div>
           </n-card>
 
@@ -223,6 +240,7 @@ function resetFilter() {
         <!-- 自定义格式弹窗 -->
         <CustomFormatDialog
           v-model:show="showCustomDialog"
+          :initial-config="customDialogTarget === 'input' ? inputCustomConfig : outputCustomConfig"
           @confirmed="onCustomConfirmed"
         />
 

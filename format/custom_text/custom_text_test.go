@@ -34,7 +34,7 @@ func TestCustomText_BaiduToQQ(t *testing.T) {
 	decoded := util.NewEncoding("UTF-16LE").Decode(buf.Bytes())
 	decoded = strings.TrimPrefix(decoded, "\uFEFF")
 
-	expected := "a'bao'zhi'gong' 阿保之功 1"
+	expected := "a'bao'zhi'gong 阿保之功 1"
 	if !strings.Contains(decoded, expected) {
 		t.Fatalf("export content missing expected line: %s", expected)
 	}

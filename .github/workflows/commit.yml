@@ -15,9 +15,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # 装 bun.js
-      - name: Install bun.js
-        uses: oven-sh/setup-bun@v2
+      # 安装 pnpm
+      - name: Setup pnpm
+        uses: pnpm/setup@v1
+        with:
+          version: 12
+          runtime: node@24
+          cache: true
 
       # 安装 go
       - name: Setup go
@@ -40,8 +44,8 @@ jobs:
       - name: Build frontend
         run: |
           cd frontend
-          bun install
-          bun run build
+          pnpm i
+          pnpm build
           cd ..
 
       # 编译

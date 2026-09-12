@@ -8,11 +8,10 @@ import (
 	_ "embed"
 
 	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
-//go:embed rime_table_decompiler_wasm.wasm
+//go:embed rime_table_decompiler.wasm
 var wasmBytes []byte
 
 // Decompile loads the wasm module and calls decompile(input_ptr, input_len, out_size_ptr).
@@ -116,99 +115,4 @@ func Decompile(inputData []byte) ([]byte, error) {
 	decompileFree.Call(ctx, uint64(outPtr))
 
 	return result, nil
-}
-
-// Reusable module wrapper for repeated calls (optional optimization).
-type WasmDecompiler struct {
-	rt  wazero.Runtime
-	mod api.Module
-}
-
-// NewWasmDecompiler creates a reusable decompiler. Call Close() when done.
-func NewWasmDecompiler(ctx context.Context, wasmBytes []byte) (*WasmDecompiler, error) {
-	rt := wazero.NewRuntime(ctx)
-
-	wasi_snapshot_preview1.MustInstantiate(ctx, rt)
-
-	_, err := rt.NewHostModuleBuilder("env").
-		NewFunctionBuilder().
-		WithFunc(func(ctx context.Context, idx int32) {}).
-		Export("emscripten_notify_memory_growth").
-		Instantiate(ctx)
-	if err != nil {
-		rt.Close(ctx)
-		return nil, err
-	}
-
-	mod, err := rt.InstantiateWithConfig(ctx, wasmBytes,
-		wazero.NewModuleConfig().WithStartFunctions())
-	if err != nil {
-		rt.Close(ctx)
-		return nil, err
-	}
-
-	if ctors := mod.ExportedFunction("__wasm_call_ctors"); ctors != nil {
-		if _, err := ctors.Call(ctx); err != nil {
-			mod.Close(ctx)
-			rt.Close(ctx)
-			return nil, err
-		}
-	}
-
-	return &WasmDecompiler{rt: rt, mod: mod}, nil
-}
-
-func (d *WasmDecompiler) Decompile(ctx context.Context, inputData []byte) ([]byte, error) {
-	memory := d.mod.Memory()
-	malloc := d.mod.ExportedFunction("malloc")
-	free := d.mod.ExportedFunction("free")
-	decompile := d.mod.ExportedFunction("decompile")
-	decompileFree := d.mod.ExportedFunction("decompile_free")
-
-	results, err := malloc.Call(ctx, uint64(len(inputData)))
-	if err != nil {
-		return nil, err
-	}
-	inPtr := uint32(results[0])
-	defer free.Call(ctx, uint64(inPtr))
-
-	if !memory.Write(inPtr, inputData) {
-		return nil, fmt.Errorf("write input failed")
-	}
-
-	results, err = malloc.Call(ctx, 4)
-	if err != nil {
-		return nil, err
-	}
-	outSizePtr := uint32(results[0])
-	defer free.Call(ctx, uint64(outSizePtr))
-	memory.WriteUint32Le(outSizePtr, 0)
-
-	results, err = decompile.Call(ctx, uint64(inPtr), uint64(len(inputData)), uint64(outSizePtr))
-	if err != nil {
-		return nil, err
-	}
-	outPtr := uint32(results[0])
-	if outPtr == 0 {
-		return nil, fmt.Errorf("decompile returned null")
-	}
-
-	outSizeBytes, _ := memory.Read(outSizePtr, 4)
-	outSize := binary.LittleEndian.Uint32(outSizeBytes)
-	output, _ := memory.Read(outPtr, outSize)
-
-	result := make([]byte, len(output))
-	copy(result, output)
-
-	decompileFree.Call(ctx, uint64(outPtr))
-	return result, nil
-}
-
-func (d *WasmDecompiler) Close(ctx context.Context) {
-	if d.mod != nil {
-		d.mod.Close(ctx)
-	}
-	if d.rt != nil {
-		d.rt.Close(ctx)
-	}
 }

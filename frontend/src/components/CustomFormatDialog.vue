@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive } from "vue";
+import { ref, reactive, watch } from "vue";
 import {
   NModal,
   NForm,
@@ -15,6 +15,7 @@ import type { CustomFormatConfig, CustomFieldConfig } from "../api";
 
 const props = defineProps<{
   show: boolean;
+  initialConfig?: CustomFormatConfig | null;
 }>();
 
 const emit = defineEmits<{
@@ -54,6 +55,59 @@ const form = reactive({
 });
 
 const errorMsg = ref("");
+
+watch(
+  () => props.show,
+  (val) => {
+    if (val && props.initialConfig) {
+      form.kind = props.initialConfig.kind || "pinyin";
+      form.encoding = props.initialConfig.encoding || "UTF-8";
+      form.sortByCode = !!props.initialConfig.sortByCode;
+      form.commentPrefix = props.initialConfig.commentPrefix ?? "#";
+      form.startMarker = props.initialConfig.startMarker ?? "";
+      form.fields = props.initialConfig.fields.map((f) => ({ ...f }));
+    }
+  },
+);
+
+function onKindChange(newKind: string) {
+  if (newKind === "wubi") {
+    let replaced = false;
+    for (const f of form.fields) {
+      if (f.type === "pinyin") {
+        f.type = "code";
+        replaced = true;
+      }
+    }
+    if (!replaced && !form.fields.some((f) => f.type === "code")) {
+      form.fields.push({
+        type: "code",
+        pinyinSeparator: "",
+        pinyinPrefix: "",
+        pinyinSuffix: "",
+        literal: "",
+      });
+    }
+  } else if (newKind === "pinyin") {
+    let replaced = false;
+    for (const f of form.fields) {
+      if (f.type === "code") {
+        f.type = "pinyin";
+        f.pinyinSeparator = "'";
+        replaced = true;
+      }
+    }
+    if (!replaced && !form.fields.some((f) => f.type === "pinyin")) {
+      form.fields.push({
+        type: "pinyin",
+        pinyinSeparator: "'",
+        pinyinPrefix: "",
+        pinyinSuffix: "",
+        literal: "",
+      });
+    }
+  }
+}
 
 const kindOptions = [
   { label: "拼音", value: "pinyin" },
@@ -164,8 +218,11 @@ function getPreviewLine(): string {
   >
     <n-form label-placement="left" label-width="100">
       <n-form-item label="类型">
-        <n-select v-model:value="form.kind" :options="kindOptions" />
+        <n-select v-model:value="form.kind" :options="kindOptions" @update:value="onKindChange" />
       </n-form-item>
+      <n-text v-if="form.kind === 'wubi'" depth="3" style="display: block; margin: -16px 0 16px 100px; font-size: 12px">
+        提示：选择五笔后，可在主界面“编码设置”中选择五笔方案（86、98、新世纪）或上传自定义码表。
+      </n-text>
       <n-form-item label="编码">
         <n-select v-model:value="form.encoding" :options="encodingOptions" />
       </n-form-item>
