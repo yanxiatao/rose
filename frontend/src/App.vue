@@ -2,7 +2,7 @@
 import { ref, computed } from 'vue'
 import {
   NConfigProvider, NMessageProvider, NCard, NButton,
-  NText, NAlert, NTag, NModal
+  NText, NAlert, NTag, NModal, NSwitch, NInputNumber
 } from 'naive-ui'
 import FileUpload from './components/FileUpload.vue'
 import FormatSelect from './components/FormatSelect.vue'
@@ -10,7 +10,7 @@ import CustomFormatDialog from './components/CustomFormatDialog.vue'
 import EncoderConfigVue from './components/EncoderConfig.vue'
 import FilterConfigVue from './components/FilterConfig.vue'
 import {
-  useFormats, convertFile, matchFormatByExt,
+  useFormats, convertFile, matchFormatByExt, formatSize,
   type UploadResult, type EncoderConfig, type FilterConfig,
   type ConvertResult, type CustomFormatConfig, type FormatInfo
 } from './api'
@@ -18,8 +18,8 @@ import {
 // 格式列表
 const { formats } = useFormats()
 
-// 步骤状态
-const uploadResult = ref<UploadResult | null>(null)
+// 已上传的词库文件（可多个，导出时自动合并）
+const uploadResults = ref<UploadResult[]>([])
 const inputFormat = ref('')
 const outputFormat = ref('')
 const encoderConfig = ref<EncoderConfig | null>(null)
@@ -33,6 +33,13 @@ const showCustomDialog = ref(false)
 const customDialogTarget = ref<'input' | 'output'>('input')
 const inputCustomConfig = ref<CustomFormatConfig | null>(null)
 const outputCustomConfig = ref<CustomFormatConfig | null>(null)
+
+// 分割导出选项：按条目数把结果拆成多个文件
+const splitEnabled = ref(false)
+const splitCount = ref(20000)
+const splitSize = computed(() =>
+  splitEnabled.value && splitCount.value > 0 ? splitCount.value : 0
+)
 
 // 弹窗状态
 const showFilterDialog = ref(false)
@@ -64,11 +71,11 @@ const selectedOutputFormat = computed<FormatInfo | null>(() => {
 
 // 是否可以转换
 const canConvert = computed(() =>
-  uploadResult.value && inputFormat.value && outputFormat.value && !converting.value
+  uploadResults.value.length > 0 && inputFormat.value && outputFormat.value && !converting.value
 )
 
 function onUploaded(result: UploadResult) {
-  uploadResult.value = result
+  uploadResults.value = [...uploadResults.value, result]
   convertResult.value = null
   errorMsg.value = ''
   // 自动匹配输入格式
@@ -76,6 +83,18 @@ function onUploaded(result: UploadResult) {
   if (matched) {
     inputFormat.value = matched
   }
+}
+
+function removeUploaded(id: string) {
+  uploadResults.value = uploadResults.value.filter(f => f.id !== id)
+  convertResult.value = null
+}
+
+// 文件扩展名自动识别出的格式名
+function matchedFormatName(filename: string): string | null {
+  const id = matchFormatByExt(filename, formats.value)
+  if (!id) return null
+  return formats.value.find(f => f.id === id)?.name || null
 }
 
 function onCustomSelect(target: 'input' | 'output') {
@@ -94,7 +113,7 @@ function onCustomConfirmed(config: CustomFormatConfig) {
 }
 
 async function doConvert() {
-  if (!canConvert.value || !uploadResult.value) return
+  if (!canConvert.value || uploadResults.value.length === 0) return
 
   converting.value = true
   errorMsg.value = ''
@@ -102,13 +121,14 @@ async function doConvert() {
 
   try {
     const result = await convertFile({
-      fileId: uploadResult.value.id,
+      fileIds: uploadResults.value.map(f => f.id),
       inputFormat: inputFormat.value,
       outputFormat: outputFormat.value,
       inputCustom: inputFormat.value === '__custom__' ? inputCustomConfig.value || undefined : undefined,
       outputCustom: outputFormat.value === '__custom__' ? outputCustomConfig.value || undefined : undefined,
       encoder: encoderConfig.value || undefined,
       filter: filterConfig.value,
+      splitSize: splitSize.value || undefined,
     })
     convertResult.value = result
     showResultDialog.value = true
@@ -135,8 +155,33 @@ function resetFilter() {
           </n-text>
 
           <!-- 第1步：上传文件 -->
-          <n-card title="①  上传词库文件" size="small" style="margin-bottom: 16px">
+          <n-card title="①  上传词库文件（可多选）" size="small" style="margin-bottom: 16px">
             <FileUpload @uploaded="onUploaded" />
+            <!-- 已上传文件列表 -->
+            <div v-if="uploadResults.length" style="margin-top: 12px; display: flex; flex-direction: column; gap: 6px">
+              <div
+                v-for="f in uploadResults"
+                :key="f.id"
+                style="display: flex; align-items: center; gap: 8px"
+              >
+                <n-tag type="success" size="small">已上传</n-tag>
+                <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+                  {{ f.filename }}
+                </span>
+                <n-text depth="3" style="font-size: 12px; flex-shrink: 0">
+                  {{ formatSize(f.size) }}
+                </n-text>
+                <n-text v-if="matchedFormatName(f.filename)" depth="3" style="font-size: 12px; flex-shrink: 0">
+                  {{ matchedFormatName(f.filename) }}
+                </n-text>
+                <n-button quaternary size="tiny" type="error" @click="removeUploaded(f.id)">
+                  移除
+                </n-button>
+              </div>
+              <n-text v-if="uploadResults.length > 1" depth="3" style="font-size: 12px">
+                共 {{ uploadResults.length }} 个词库文件，导出时将自动合并
+              </n-text>
+            </div>
           </n-card>
 
           <!-- 第2步：选择输入格式 -->
@@ -175,11 +220,27 @@ function resetFilter() {
             @update:config="encoderConfig = $event"
           />
 
-          <!-- 第4步：过滤选项（弹窗触发按钮） -->
-          <div style="text-align: center; margin: 16px 0">
+          <!-- 过滤与分割选项 -->
+          <div
+            style="margin: 16px 0; display: flex; align-items: center; justify-content: center; gap: 24px; flex-wrap: wrap"
+          >
             <n-button @click="showFilterDialog = true" quaternary type="info">
               过滤选项（可选）
             </n-button>
+            <div v-if="outputFormat" style="display: flex; align-items: center; gap: 8px">
+              <n-switch v-model:value="splitEnabled" size="small" />
+              <n-text style="font-size: 13px">按条目数分割</n-text>
+              <template v-if="splitEnabled">
+                <n-input-number
+                  v-model:value="splitCount"
+                  size="small"
+                  :min="1"
+                  :step="1000"
+                  style="width: 130px"
+                />
+                <n-text depth="3" style="font-size: 12px">条/文件（默认 20000）</n-text>
+              </template>
+            </div>
           </div>
 
           <!-- 转换按钮 -->
@@ -218,12 +279,30 @@ function resetFilter() {
           <template v-if="convertResult">
             <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px">
               <n-tag type="success" size="medium">转换成功</n-tag>
+              <n-tag v-if="convertResult.mergedFiles" size="medium" type="info">
+                已合并 {{ convertResult.mergedFiles }} 个词库文件
+              </n-tag>
             </div>
             <div style="display: flex; flex-direction: column; gap: 8px">
-              <n-text>输出文件: <strong>{{ convertResult.outputPath }}</strong></n-text>
-              <div style="display: flex; gap: 16px">
+              <div v-if="convertResult.outputFiles && convertResult.outputFiles.length > 1">
+                <n-text>输出文件（{{ convertResult.outputFiles.length }} 个）:</n-text>
+                <div
+                  v-for="p in convertResult.outputFiles"
+                  :key="p"
+                  style="font-size: 13px; word-break: break-all"
+                >
+                  {{ p }}
+                </div>
+              </div>
+              <n-text v-else>
+                输出文件: <strong>{{ convertResult.outputPath }}</strong>
+              </n-text>
+              <div style="display: flex; gap: 16px; flex-wrap: wrap">
                 <n-text>输入词条: <strong>{{ convertResult.stats.inputEntries }}</strong></n-text>
                 <n-text>输出词条: <strong>{{ convertResult.stats.outputEntries }}</strong></n-text>
+                <n-text v-if="convertResult.stats.duplicates" depth="3">
+                  去重: {{ convertResult.stats.duplicates }}
+                </n-text>
                 <n-text v-if="convertResult.stats.filteredOut > 0" depth="3">
                   过滤: {{ convertResult.stats.filteredOut }}
                 </n-text>

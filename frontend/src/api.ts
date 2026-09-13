@@ -54,21 +54,25 @@ export interface CustomFormatConfig {
 }
 
 export interface ConvertRequest {
-  fileId: string
+  fileIds: string[] // 多文件，导出时自动合并
   inputFormat: string
   outputFormat: string
   inputCustom?: CustomFormatConfig
   outputCustom?: CustomFormatConfig
   encoder?: EncoderConfig
   filter?: FilterConfig
+  splitSize?: number // 按条目数分割输出，0/不传表示不分割
 }
 
 export interface ConvertResult {
   outputPath: string
+  outputFiles?: string[] // 分割导出时的所有输出文件
+  mergedFiles?: number // 合并的文件数，单文件时无此字段
   stats: {
     inputEntries: number
     outputEntries: number
     filteredOut: number
+    duplicates?: number
   }
 }
 
@@ -103,6 +107,12 @@ export async function convertFile(req: ConvertRequest): Promise<ConvertResult> {
 }
 
 // === 工具函数 ===
+
+export function formatSize(bytes: number): string {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
 
 export function formatKindLabel(kind: number): string {
   switch (kind) {

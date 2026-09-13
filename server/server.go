@@ -42,13 +42,15 @@ type StoredFile struct {
 
 // ConvertRequest 转换请求
 type ConvertRequest struct {
-	FileID       string                        `json:"fileId"`
+	FileIDs      []string                      `json:"fileIds,omitempty"` // 多文件，导出时自动合并
+	FileID       string                        `json:"fileId,omitempty"`  // 兼容旧版单文件
 	InputFormat  string                        `json:"inputFormat"`
 	OutputFormat string                        `json:"outputFormat"`
 	InputCustom  *converter.CustomFormatConfig `json:"inputCustom,omitempty"`
 	OutputCustom *converter.CustomFormatConfig `json:"outputCustom,omitempty"`
 	Encoder      *EncoderConfig                `json:"encoder,omitempty"`
 	Filter       *FilterConfig                 `json:"filter,omitempty"`
+	SplitSize    int                           `json:"splitSize,omitempty"` // 按条目数分割输出，0 表示不分割
 }
 
 // EncoderConfig 编码器配置
@@ -180,12 +182,30 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "输入或输出格式缺失", http.StatusBadRequest)
 		return
 	}
-	stored := findStoredFile(req.FileID)
-	if stored == nil {
-		http.Error(w, "文件不存在，请先上传", http.StatusBadRequest)
+
+	// 收集待转换文件（兼容旧的单文件字段）
+	fileIDs := req.FileIDs
+	if len(fileIDs) == 0 && req.FileID != "" {
+		fileIDs = []string{req.FileID}
+	}
+	stored := make([]*StoredFile, 0, len(fileIDs))
+	for _, id := range fileIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		f := findStoredFile(id)
+		if f == nil {
+			http.Error(w, "文件不存在，请先上传", http.StatusBadRequest)
+			return
+		}
+		stored = append(stored, f)
+	}
+	if len(stored) == 0 {
+		http.Error(w, "请先上传文件", http.StatusBadRequest)
 		return
 	}
-	log.Printf("POST /api/convert file=%s input=%s output=%s", stored.Filename, inputFormat, outputFormat)
+	log.Printf("POST /api/convert files=%d input=%s output=%s", len(stored), inputFormat, outputFormat)
 
 	conv := converter.NewConverter()
 
@@ -200,23 +220,39 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	applyFilters(conv, req.Filter)
 
 	// 生成输出路径
-	outputFilename := buildOutputFilename(stored.Filename, outputFormat)
+	outputFilename := buildOutputFilename(stored[0].Filename, outputFormat)
+	if len(stored) > 1 {
+		outputFilename = buildMergedFilename(stored[0].Filename, len(stored), outputFormat)
+	}
 	outputDir := "output"
 	_ = os.MkdirAll(outputDir, 0o755)
 	outputPath := uniquePath(filepath.Join(outputDir, outputFilename))
 
-	result, err := conv.Convert(&converter.Job{
-		Input: &converter.InputSpec{
-			Source: model.NewFileSource(stored.Path),
-			Path:   stored.Filename,
+	// 分割条目数合法性检查
+	splitSize := req.SplitSize
+	if splitSize < 0 {
+		splitSize = 0
+	}
+
+	// 每个文件构建一个输入配置，导出时合并词条
+	inputs := make([]*converter.InputSpec, 0, len(stored))
+	for _, f := range stored {
+		inputs = append(inputs, &converter.InputSpec{
+			Source: model.NewFileSource(f.Path),
+			Path:   f.Filename,
 			Format: inputFormat,
 			Custom: req.InputCustom,
-		},
+		})
+	}
+
+	result, err := conv.Convert(&converter.Job{
+		Inputs: inputs,
 		Output: &converter.OutputSpec{
 			Path:      outputPath,
 			Format:    outputFormat,
 			Custom:    req.OutputCustom,
 			Overwrite: true,
+			SplitSize: splitSize,
 		},
 	})
 	if err != nil {
@@ -225,14 +261,22 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, map[string]any{
-		"outputPath": outputPath,
+	resp := map[string]any{
+		"outputPath": result.OutputFile,
 		"stats": map[string]int{
 			"inputEntries":  result.Stats.InputEntries,
 			"outputEntries": result.Stats.OutputEntries,
 			"filteredOut":   result.Stats.FilteredOut,
+			"duplicates":    result.Stats.Duplicates,
 		},
-	})
+	}
+	if len(stored) > 1 {
+		resp["mergedFiles"] = len(stored)
+	}
+	if len(result.OutputFiles) > 1 {
+		resp["outputFiles"] = result.OutputFiles
+	}
+	writeJSON(w, resp)
 }
 
 // --- 辅助函数 ---
@@ -315,6 +359,16 @@ func buildOutputFilename(inputFilename, outputFormat string) string {
 	}
 	name += ext
 	return name
+}
+
+// buildMergedFilename 多文件合并导出时的输出文件名
+func buildMergedFilename(firstFilename string, count int, outputFormat string) string {
+	base := strings.TrimSuffix(firstFilename, filepath.Ext(firstFilename))
+	ext := getFormatExtension(outputFormat)
+	if ext == "" {
+		ext = ".txt"
+	}
+	return fmt.Sprintf("%s_等%d个合并_%s%s", base, count, outputFormat, ext)
 }
 
 func getFormatExtension(formatID string) string {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -38,7 +39,8 @@ func NewDefaultConverter() *Converter {
 
 // Job 转换请求
 type Job struct {
-	Input   *InputSpec
+	Input   *InputSpec   // 单输入（与 Inputs 二选一）
+	Inputs  []*InputSpec // 多输入，导出时合并词条
 	Output  *OutputSpec
 	Encoder *EncodingSpec
 }
@@ -77,13 +79,15 @@ type OutputSpec struct {
 	Format    string
 	Custom    *CustomFormatConfig // 当 Format 为自定义时，携带格式配置
 	Overwrite bool
+	SplitSize int // 按条目数分割成多个文件，0 表示不分割
 }
 
 // Result 转换结果
 type Result struct {
-	OutputFile string
-	Stats      *Stats
-	Entries    []*model.Entry
+	OutputFile  string
+	OutputFiles []string // 分割导出时的所有输出文件
+	Stats       *Stats
+	Entries     []*model.Entry
 }
 
 // Stats 转换统计信息
@@ -91,6 +95,7 @@ type Stats struct {
 	InputEntries  int
 	OutputEntries int
 	FilteredOut   int
+	Duplicates    int // 合并多文件时去除的重复词条数
 	ProcessTime   time.Duration
 }
 
@@ -104,25 +109,19 @@ type EncodingSpec struct {
 func (c *Converter) Convert(req *Job) (*Result, error) {
 	start := time.Now()
 
-	// 1. 验证输入配置
-	if req.Input == nil {
+	// 1. 收集输入配置（兼容单个 Input 与多个 Inputs）
+	inputs := req.Inputs
+	if len(inputs) == 0 && req.Input != nil {
+		inputs = []*InputSpec{req.Input}
+	}
+	if len(inputs) == 0 {
 		return nil, fmt.Errorf("input config is required")
 	}
 	if req.Output == nil {
 		return nil, fmt.Errorf("output config is required")
 	}
 
-	// 2. 获取输入格式处理器
-	inputFormat, ok := c.getFormat(req.Input.Format, req.Input.Custom)
-	if !ok {
-		return nil, fmt.Errorf("unsupported input format: %s", req.Input.Format)
-	}
-	importer, ok := inputFormat.(model.Importer)
-	if !ok {
-		return nil, fmt.Errorf("input format does not support import: %s", req.Input.Format)
-	}
-
-	// 3. 获取输出格式处理器
+	// 2. 获取输出格式处理器
 	outputFormat, ok := c.getFormat(req.Output.Format, req.Output.Custom)
 	if !ok {
 		return nil, fmt.Errorf("unsupported output format: %s", req.Output.Format)
@@ -132,22 +131,37 @@ func (c *Converter) Convert(req *Job) (*Result, error) {
 		return nil, fmt.Errorf("output format does not support export: %s", req.Output.Format)
 	}
 
-	// 4. 解析输入文件
-	src := req.Input.Source
-	if src == nil {
-		if req.Input.Path == "" {
-			return nil, fmt.Errorf("input source is required")
+	// 3. 逐个解析输入文件，合并词条
+	entries := make([]*model.Entry, 0, 1024)
+	var firstInputFormat model.Format
+	for i, in := range inputs {
+		inputFormat, ok := c.getFormat(in.Format, in.Custom)
+		if !ok {
+			return nil, fmt.Errorf("unsupported input format: %s", in.Format)
 		}
-		src = model.NewFileSource(req.Input.Path)
-	}
-
-	entries, err := importer.Import(src)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse input file: %w", err)
+		importer, ok := inputFormat.(model.Importer)
+		if !ok {
+			return nil, fmt.Errorf("input format does not support import: %s", in.Format)
+		}
+		if i == 0 {
+			firstInputFormat = inputFormat
+		}
+		src := in.Source
+		if src == nil {
+			if in.Path == "" {
+				return nil, fmt.Errorf("input source is required")
+			}
+			src = model.NewFileSource(in.Path)
+		}
+		parsed, err := importer.Import(src)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse input file %s: %w", in.Path, err)
+		}
+		entries = append(entries, parsed...)
 	}
 	originalCount := len(entries)
 
-	// 5. 应用编码器转换
+	// 4. 应用编码器转换
 	var encoder convEncoder.Encoder = &convEncoder.NullEncoder{}
 	if req.Encoder != nil {
 		if e := c.createEncoder(req.Encoder); e != nil {
@@ -157,7 +171,7 @@ func (c *Converter) Convert(req *Job) (*Result, error) {
 		if c.encoder != nil {
 			encoder = c.encoder
 		} else {
-			encoder = c.autoEncoder(inputFormat, outputFormat)
+			encoder = c.autoEncoder(firstInputFormat, outputFormat)
 		}
 	}
 
@@ -166,44 +180,112 @@ func (c *Converter) Convert(req *Job) (*Result, error) {
 		encoder.EncodeBatch(entries)
 	}
 
+	// 5. 多文件合并时去除词与编码完全相同的重复词条
+	duplicates := 0
+	if len(inputs) > 1 {
+		entries, duplicates = dedupeEntries(entries)
+	}
+
 	// 6. 应用过滤器（编码后过滤）
 	if len(c.filters) > 0 {
 		entries = c.applyFilters(entries)
 	}
 
-	// 7. 导出到文件
-	writer := req.Output.Writer
-	outputFile := req.Output.Path
-	if writer == nil {
-		if outputFile == "" {
-			return nil, fmt.Errorf("output writer or file path is required")
-		}
-		f, err := os.Create(outputFile)
+	// 7. 导出到文件（SplitSize > 0 时按条目数分割成多个文件）
+	var outputFiles []string
+	if req.Output.SplitSize > 0 && req.Output.Writer == nil && len(entries) > req.Output.SplitSize {
+		files, err := c.exportSplit(exporter, entries, req.Output)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create output file: %w", err)
+			return nil, err
 		}
-		defer f.Close()
-		writer = f
-	}
+		outputFiles = files
+	} else {
+		writer := req.Output.Writer
+		outputFile := req.Output.Path
+		if writer == nil {
+			if outputFile == "" {
+				return nil, fmt.Errorf("output writer or file path is required")
+			}
+			f, err := os.Create(outputFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create output file: %w", err)
+			}
+			defer f.Close()
+			writer = f
+		}
 
-	err = exporter.Export(entries, writer)
-	if err != nil {
-		return nil, fmt.Errorf("failed to export to file: %w", err)
+		if err := exporter.Export(entries, writer); err != nil {
+			return nil, fmt.Errorf("failed to export to file: %w", err)
+		}
+		outputFiles = []string{outputFile}
 	}
 
 	// 8. 计算统计信息
 	stats := &Stats{
 		InputEntries:  originalCount,
 		OutputEntries: len(entries),
-		FilteredOut:   originalCount - len(entries),
+		FilteredOut:   originalCount - duplicates - len(entries),
+		Duplicates:    duplicates,
 		ProcessTime:   time.Since(start),
 	}
 
 	return &Result{
-		OutputFile: outputFile,
-		Stats:      stats,
-		Entries:    entries,
+		OutputFile:  outputFiles[0],
+		OutputFiles: outputFiles,
+		Stats:       stats,
+		Entries:     entries,
 	}, nil
+}
+
+// exportSplit 按条目数将词条分割导出为多个文件，返回输出文件列表
+func (c *Converter) exportSplit(exporter model.Exporter, entries []*model.Entry, output *OutputSpec) ([]string, error) {
+	if output.Path == "" {
+		return nil, fmt.Errorf("output file path is required")
+	}
+	ext := filepath.Ext(output.Path)
+	stem := strings.TrimSuffix(output.Path, ext)
+
+	files := make([]string, 0, len(entries)/output.SplitSize+1)
+	for start, i := 0, 1; start < len(entries); start, i = start+output.SplitSize, i+1 {
+		end := min(start+output.SplitSize, len(entries))
+		path := fmt.Sprintf("%s_%d%s", stem, i, ext)
+		f, err := os.Create(path)
+		if err != nil {
+			return files, fmt.Errorf("failed to create output file: %w", err)
+		}
+		err = exporter.Export(entries[start:end], f)
+		f.Close()
+		if err != nil {
+			return files, fmt.Errorf("failed to export to file: %w", err)
+		}
+		files = append(files, path)
+	}
+	return files, nil
+}
+
+// dedupeEntries 去除词与编码完全相同的重复词条，保留首次出现的
+func dedupeEntries(entries []*model.Entry) ([]*model.Entry, int) {
+	type entryKey struct {
+		word     string
+		code     string
+		codeType model.CodeType
+	}
+	seen := make(map[entryKey]struct{}, len(entries))
+	kept := make([]*model.Entry, 0, len(entries))
+	duplicates := 0
+	for _, e := range entries {
+		key := entryKey{word: e.Word, codeType: e.CodeType}
+		if e.Code != nil {
+			key.code = e.Code.String()
+		}
+		if _, ok := seen[key]; ok {
+			duplicates++
+			continue
+		}
+		seen[key] = struct{}{}
+		kept = append(kept, e)
+	}
+	return kept, duplicates
 }
 
 // GetSupportedFormats 获取支持的格式列表

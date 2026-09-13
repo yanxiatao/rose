@@ -1,6 +1,9 @@
 package converter
 
 import (
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/nopdan/rose/encoder"
@@ -96,4 +99,130 @@ func TestConverterIntegration(t *testing.T) {
 	}
 
 	t.Log("Integration test passed - converter can handle filters and encoder")
+}
+
+func TestDedupeEntries(t *testing.T) {
+	entries := []*model.Entry{
+		{Word: "你好", Code: model.NewSimpleCode("nihc")},
+		{Word: "你好", Code: model.NewSimpleCode("nihc")},
+		{Word: "你好", Code: model.NewSimpleCode("nihao")},
+		{Word: "世界", Code: model.NewMultiCode("shi", "jie")},
+		{Word: "世界", Code: model.NewMultiCode("shi", "jie")},
+		{Word: "世界"},
+	}
+	kept, duplicates := dedupeEntries(entries)
+	if duplicates != 2 {
+		t.Errorf("Expected 2 duplicates, got %d", duplicates)
+	}
+	if len(kept) != 4 {
+		t.Fatalf("Expected 4 entries after dedupe, got %d", len(kept))
+	}
+	if kept[0].Code.String() != "nihc" || kept[1].Code.String() != "nihao" {
+		t.Errorf("Unexpected entries after dedupe: %s, %s", kept[0].Code, kept[1].Code)
+	}
+}
+
+func TestConvertMergeMultipleInputs(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(name, content string) string {
+		path := dir + "/" + name
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	pathA := writeFile("a.txt", "你好\n世界\n再见\n")
+	pathB := writeFile("b.txt", "你好\n世界\n劳动\n")
+
+	wordsFormat := func() *CustomFormatConfig {
+		return &CustomFormatConfig{Kind: "words"}
+	}
+	outputPath := dir + "/merged.txt"
+
+	conv := NewConverter()
+	result, err := conv.Convert(&Job{
+		Inputs: []*InputSpec{
+			{Path: pathA, Format: "custom", Custom: wordsFormat()},
+			{Path: pathB, Format: "custom", Custom: wordsFormat()},
+		},
+		Output: &OutputSpec{
+			Path:   outputPath,
+			Format: "custom",
+			Custom: wordsFormat(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Convert failed: %v", err)
+	}
+
+	if result.Stats.InputEntries != 6 {
+		t.Errorf("Expected 6 input entries, got %d", result.Stats.InputEntries)
+	}
+	if result.Stats.Duplicates != 2 {
+		t.Errorf("Expected 2 duplicates, got %d", result.Stats.Duplicates)
+	}
+	if result.Stats.OutputEntries != 4 {
+		t.Errorf("Expected 4 output entries, got %d", result.Stats.OutputEntries)
+	}
+	if result.Stats.FilteredOut != 0 {
+		t.Errorf("Expected 0 filtered entries, got %d", result.Stats.FilteredOut)
+	}
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\r\n"), "\n")
+	if len(lines) != 4 {
+		t.Errorf("Expected 4 lines in merged output, got %d: %q", len(lines), string(data))
+	}
+}
+
+func TestConvertSplitOutput(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/words.txt"
+	if err := os.WriteFile(path, []byte("甲\n乙\n丙\n丁\n戊\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	outputPath := dir + "/split.txt"
+	conv := NewConverter()
+	result, err := conv.Convert(&Job{
+		Input: &InputSpec{
+			Path:   path,
+			Format: "custom",
+			Custom: &CustomFormatConfig{Kind: "words"},
+		},
+		Output: &OutputSpec{
+			Path:      outputPath,
+			Format:    "custom",
+			Custom:    &CustomFormatConfig{Kind: "words"},
+			SplitSize: 2,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Convert failed: %v", err)
+	}
+
+	if len(result.OutputFiles) != 3 {
+		t.Fatalf("Expected 3 output files, got %d: %v", len(result.OutputFiles), result.OutputFiles)
+	}
+	expectedCounts := []int{2, 2, 1}
+	for i, file := range result.OutputFiles {
+		expected := fmt.Sprintf("%s/split_%d.txt", dir, i+1)
+		if file != expected {
+			t.Errorf("Expected file %s, got %s", expected, file)
+		}
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimRight(string(data), "\r\n"), "\n")
+		if len(lines) != expectedCounts[i] {
+			t.Errorf("Expected %d lines in %s, got %d: %q", expectedCounts[i], file, len(lines), string(data))
+		}
+	}
+	if result.Stats.OutputEntries != 5 {
+		t.Errorf("Expected 5 output entries, got %d", result.Stats.OutputEntries)
+	}
 }
