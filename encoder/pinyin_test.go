@@ -82,3 +82,36 @@ func TestPinyinEncodeBatch(t *testing.T) {
 		}
 	}
 }
+
+func TestPinyinEncode_ShapeCodeReencode(t *testing.T) {
+	// 形码词条（如四键 aaqd）被标为拼音类型时，音节数与字数不符，应重新生成拼音
+	enc := NewPinyinEncoder()
+	entry := &model.Entry{
+		Word:     "暗暗祈祷",
+		Code:     model.NewMultiCode("aaqd"),
+		CodeType: model.CodeTypePinyin,
+	}
+
+	enc.Encode(entry)
+
+	codes := entry.Code.Strings()
+	if got, want := len(codes), 4; got != want {
+		t.Fatalf("expected %d re-encoded syllables, got %d: %v", want, got, codes)
+	}
+	for _, c := range codes {
+		if c == "aaqd" {
+			t.Fatalf("shape code should be replaced, got %v", codes)
+		}
+	}
+
+	// 正常逐字拼音不应被改写
+	keep := &model.Entry{
+		Word:     "你好",
+		Code:     model.NewMultiCode("ni", "hao"),
+		CodeType: model.CodeTypePinyin,
+	}
+	enc.Encode(keep)
+	if got := keep.Code.Strings(); got[0] != "ni" || got[1] != "hao" {
+		t.Fatalf("valid pinyin should be preserved, got %v", got)
+	}
+}

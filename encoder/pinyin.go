@@ -28,7 +28,11 @@ func (e *PinyinEncoder) Encode(entry *model.Entry) {
 	}
 	switch entry.CodeType {
 	case model.CodeTypePinyin:
-		return // 已经是拼音编码，无需转换
+		// 音节数应与字数一致；不符说明原编码并非逐字拼音（如形码、缩写码），需重新生成
+		if entry.Code != nil && len(entry.Code.Strings()) == utf8.RuneCountInString(entry.Word) {
+			return // 已经是拼音编码，无需转换
+		}
+		entry.Code = model.NewMultiCode(e.m.Mark(entry.Word)...)
 	case model.CodeTypeIncompletePinyin:
 		word := []rune(entry.Word)
 		newCodes := make([]string, 0, len(word))

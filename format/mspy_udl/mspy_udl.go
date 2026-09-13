@@ -88,6 +88,36 @@ func (f *MspyUDL) Import(src model.Source) ([]*model.Entry, error) {
 	return entries, nil
 }
 
+// Exportable 判断词条能否被完整写入 mspy_udl 文件：
+// 纯汉字、长度不超过12、逐字拼音且每个音节都在音节表内、不含 BMP 之外的字符
+func (f *MspyUDL) Exportable(e *model.Entry) bool {
+	runes := []rune(e.Word)
+	if len(runes) == 0 || len(runes) > 12 {
+		return false
+	}
+	for _, r := range runes {
+		if !unicode.Is(unicode.Han, r) {
+			return false
+		}
+		if r > 0xFFFF { // UTF-16 代理对会导致字数与索引数不一致
+			return false
+		}
+	}
+	if e.Code == nil {
+		return false
+	}
+	codes := e.Code.Strings()
+	if len(codes) != len(runes) {
+		return false
+	}
+	for _, c := range codes {
+		if _, ok := f.pyMap[c]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (f *MspyUDL) Export(entries []*model.Entry, w io.Writer) error {
 	// 过滤只保留纯汉字词条
 	validEntries := make([]*model.Entry, 0)
@@ -109,6 +139,7 @@ func (f *MspyUDL) Export(entries []*model.Entry, w io.Writer) error {
 		Word    string
 		Pinyin  []string
 		Jianpin []byte
+		Index   []byte // 每个字对应的拼音索引，2字节一个
 	}
 
 	dict := make([]*udlEntry, 0, len(validEntries))
@@ -121,11 +152,19 @@ func (f *MspyUDL) Export(entries []*model.Entry, w io.Writer) error {
 			continue
 		}
 
+		indexBytes := f.GetIndex(codes)
+		// 每个字都必须有合法的拼音索引，否则记录不完整，导入工具会报格式错误
+		if len(indexBytes) != len(codes)*2 {
+			f.Debugf("拼音无法映射，跳过: %s %s\n", entry.Word, entry.Code)
+			continue
+		}
+
 		jianpin := f.jianpin(codes)
 		dict = append(dict, &udlEntry{
 			Word:    entry.Word,
 			Pinyin:  codes,
 			Jianpin: jianpin,
+			Index:   indexBytes,
 		})
 	}
 
@@ -161,10 +200,13 @@ func (f *MspyUDL) Export(entries []*model.Entry, w io.Writer) error {
 			f.Infof("词组过长，跳过: %s\n", v.Word)
 			continue
 		}
+		// UTF-16 单元数必须与拼音索引数一致（排除代理对字符），否则记录不完整
+		if len(wordBytes)/2 != len(v.Index)/2 {
+			continue
+		}
 
 		// 写入拼音索引
-		indexBytes := f.GetIndex(v.Pinyin)
-		copy(b[12+len(wordBytes):], indexBytes)
+		copy(b[12+len(wordBytes):], v.Index)
 
 		buf.Write(b)
 	}

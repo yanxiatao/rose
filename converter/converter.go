@@ -180,6 +180,18 @@ func (c *Converter) Convert(req *Job) (*Result, error) {
 		encoder.EncodeBatch(entries)
 	}
 
+	// 目标格式声明了导出校验时，先剔除无法导出的词条，
+	// 保证按条目数分割出的每个文件都是满额且合法的
+	if validator, ok := exporter.(model.ExportValidator); ok {
+		kept := make([]*model.Entry, 0, len(entries))
+		for _, e := range entries {
+			if validator.Exportable(e) {
+				kept = append(kept, e)
+			}
+		}
+		entries = kept
+	}
+
 	// 5. 多文件合并时去除词与编码完全相同的重复词条
 	duplicates := 0
 	if len(inputs) > 1 {

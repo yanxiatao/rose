@@ -49,6 +49,13 @@ type Exporter interface {
 	Export(entries []*Entry, w io.Writer) error
 }
 
+// ExportValidator 可选接口：格式声明哪些词条可以被完整导出
+// 实现该接口时，转换器会在导出（含分割）前剔除不可导出的词条，
+// 保证按条目数分割出的每个文件都是满额且合法的
+type ExportValidator interface {
+	Exportable(entry *Entry) bool
+}
+
 // LogLevel 日志级别
 // 0: 不打印任何信息
 // 1: 打印解析或生成的基础信息

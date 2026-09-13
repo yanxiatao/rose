@@ -107,9 +107,10 @@ func (d *MswbLex) Export(di []*model.Entry, w io.Writer) error {
 		codeLen := min(len(c), 4)
 		buf.Write(util.To2Bytes(codeLen))
 		tmp := utf16.Encode(c)
-		code := make([]byte, 4)
-		codeWeight[code[0]]++
+		// 编码区固定 8 字节，与导入器一致；统计需在填充后进行
+		code := make([]byte, 8)
 		copy(code, tmp)
+		codeWeight[code[0]]++
 		buf.Write(code)
 		buf.Write(word)
 		buf.Write([]byte{0, 0})
