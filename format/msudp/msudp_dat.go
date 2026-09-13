@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/nopdan/rose/model"
@@ -14,6 +15,7 @@ var utf16 = util.NewEncoding("UTF-16LE")
 
 type MsUDP struct {
 	model.BaseFormat
+	pinyinForm bool // 拼音形式：相同拼音码的短语按词频生成候选序
 }
 
 func New() *MsUDP {
@@ -26,6 +28,51 @@ func New() *MsUDP {
 			Description: "微软输入法用户自定义短语格式",
 		},
 	}
+}
+
+// NewPinyin 微软拼音自定义短语（拼音形式）
+// 编码为词组的完整拼音，输入该拼音时短语作为首选候选出现；
+// 可用于绕过自学习词库 2 万条上限（自定义短语无此限制）
+func NewPinyin() *MsUDP {
+	return &MsUDP{
+		BaseFormat: model.BaseFormat{
+			ID:          "mspy_eudp",
+			Name:        "微软拼音自定义短语(拼音)",
+			Type:        model.FormatTypePinyin,
+			Extension:   ".dat",
+			Description: "微软拼音自定义短语格式(ChsPinyinEUDP.dat)，编码为词组完整拼音",
+		},
+		pinyinForm: true,
+	}
+}
+
+// Exportable 词条能写出记录的条件：词与编码非空
+func (f *MsUDP) Exportable(e *model.Entry) bool {
+	return e.Word != "" && e.Code != nil && e.Code.String() != ""
+}
+
+// genRank 相同编码的词条按词频降序生成候选序（1-9，超出按 9）
+func genRank(di []*model.Entry) []*model.Entry {
+	slices.SortStableFunc(di, func(a, b *model.Entry) int {
+		if c := strings.Compare(a.Code.String(), b.Code.String()); c != 0 {
+			return c
+		}
+		return b.Frequency - a.Frequency
+	})
+	prev := ""
+	rank := 0
+	for _, e := range di {
+		code := e.Code.String()
+		if code != prev {
+			prev = code
+			rank = 0
+		}
+		if rank < 9 {
+			rank++
+		}
+		e.Rank = rank
+	}
+	return di
 }
 
 func (f *MsUDP) Import(src model.Source) ([]*model.Entry, error) {
@@ -85,7 +132,7 @@ func (f *MsUDP) Import(src model.Source) ([]*model.Entry, error) {
 	return entries, nil
 }
 
-func (MsUDP) Export(di []*model.Entry, w io.Writer) error {
+func (f *MsUDP) Export(di []*model.Entry, w io.Writer) error {
 	now := time.Now()
 	export_stamp := util.To4Bytes(now.Unix())
 	insert_stamp := MsTimeTo(now)
@@ -93,9 +140,9 @@ func (MsUDP) Export(di []*model.Entry, w io.Writer) error {
 	di = slices.DeleteFunc(di, func(e *model.Entry) bool {
 		return e.Code.String() == ""
 	})
-	// if !hasRank {
-	// 	di = GenRank(di)
-	// }
+	if f.pinyinForm {
+		di = genRank(di)
+	}
 
 	b := make([]byte, 0, len(di))
 	b = append(b, 0x6D, 0x73, 0x63, 0x68, 0x78, 0x75, 0x64, 0x70,
@@ -116,7 +163,8 @@ func (MsUDP) Export(di []*model.Entry, w io.Writer) error {
 		b = append(b, 0x10, 0, 0x10, 0)
 		wordBytes := utf16.Encode(v.Word)
 		codeBytes := utf16.Encode(v.Code.String())
-		b = append(b, util.To2Bytes(len(codeBytes)+18)...)
+		// 长度字段 = rank 字段到记录末尾的字节数
+		b = append(b, util.To2Bytes(len(codeBytes)+len(wordBytes)+14)...)
 		rank := max(v.Rank, 1)
 		b = append(b, byte(rank))
 		b = append(b, 0x06, 0, 0, 0, 0)

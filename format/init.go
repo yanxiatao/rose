@@ -33,6 +33,7 @@ func init() {
 	RegisterFormat(baidu_bak.New())
 	RegisterFormat(qq_qpyd.New())
 	RegisterFormat(mspy_udl.New())
+	RegisterFormat(msudp.NewPinyin())
 	RegisterFormat(ziguang_uwl.New())
 	RegisterFormat(kafan_pinyin_bak.New())
 	RegisterFormat(gboard.New())
